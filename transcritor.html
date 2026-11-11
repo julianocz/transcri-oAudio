@@ -100,8 +100,9 @@ select.btn{font-weight:500;align-self:flex-start}
       <input type="file" id="file" accept="audio/*,video/*,.ogg,.opus,.m4a,.mp3,.wav,.webm" hidden>
     </div>
     <select id="model" class="btn" aria-label="Qualidade">
-      <option value="onnx-community/whisper-base">Rápido (~80 MB)</option>
-      <option value="onnx-community/whisper-small">Mais preciso (~250 MB)</option>
+      <option value="onnx-community/whisper-tiny">Leve, para celular simples (~40 MB)</option>
+      <option value="onnx-community/whisper-base" selected>Normal (~80 MB)</option>
+      <option value="onnx-community/whisper-small">Mais preciso, celular forte (~250 MB)</option>
     </select>
     <div class="prog" id="prog" hidden><div id="progbar"></div></div>
     <div class="status" id="fstatus" style="text-align:left"></div>
@@ -261,67 +262,112 @@ function renderHist(){const h=store.get(KEY_HIST,[]),ul=$("hist");ul.innerHTML="
     ul.appendChild(li)})}
 
 // ---- Transcrição de arquivo (Whisper rodando no aparelho)
-const fstatus=$("fstatus"), prog=$("prog"), progbar=$("progbar");
+const fstatus=$("fstatus"), prog=$("prog"), progbar=$("progbar"), modelSel=$("model");
 let asr=null, asrModel=null, busy=false;
+const CH=30*16000;
+const isMem=e=>/memory|alloc|RangeError|OOM|out of/i.test(String(e&&(e.message||e)));
+try{const m=store.get("tv_model",null);if(m&&[...modelSel.options].some(o=>o.value===m))modelSel.value=m}catch(_){}
+modelSel.addEventListener("change",()=>store.set("tv_model",modelSel.value));
+function lighter(){const i=modelSel.selectedIndex;if(i>0){modelSel.selectedIndex=i-1;store.set("tv_model",modelSel.value);return modelSel.options[i-1].textContent}return null}
+
+async function freeModel(){try{if(asr&&asr.dispose)await asr.dispose()}catch(_){}asr=null;asrModel=null}
+async function loadModel(){
+  const model=modelSel.value;
+  if(asr&&asrModel===model)return;
+  await freeModel();
+  fstatus.textContent="Preparando o modelo de voz…";
+  const T=await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2");
+  try{T.env.backends.onnx.wasm.numThreads=1}catch(_){}
+  const files={};
+  asr=await T.pipeline("automatic-speech-recognition",model,{dtype:"q8",
+    progress_callback:p=>{if(p.status==="progress"&&p.total){files[p.file]=[p.loaded,p.total];
+      let a=0,b=0;for(const k in files){a+=files[k][0];b+=files[k][1]}
+      progbar.style.width=Math.round(a/b*100)+"%";fstatus.textContent="Baixando o modelo… "+Math.round(a/b*100)+"% (só na primeira vez)"}}});
+  asrModel=model;
+}
+
+// job: {name,key,total,chunk(k)->Float32Array, done()}
+async function runJob(job){
+  await loadModel();
+  const prev=store.get(KEY_JOB,null);
+  let start=0, ftext="";
+  if(prev&&prev.key===job.key&&prev.done<job.total){start=prev.done;ftext=prev.text||"";toast("Continuando da parte "+(start+1))}
+  else if(text.value.trim()) append("\n\n");
+  for(let k=start;k<job.total;k++){
+    fstatus.textContent="Transcrevendo parte "+(k+1)+" de "+job.total+"…";
+    progbar.style.width=Math.round(k/job.total*100)+"%";
+    let seg=job.chunk(k);
+    const r=await asr(seg,{language:"portuguese",task:"transcribe"});
+    seg=null;
+    const t=(r.text||"").trim();
+    if(t){append(t+" ");ftext+=t+" "}
+    store.set(KEY_JOB,{key:job.key,name:job.name,done:k+1,total:job.total,text:ftext});
+  }
+  progbar.style.width="100%";
+  store.set(KEY_JOB,null);
+  if(ftext.trim()){addHist(job.name,ftext);fstatus.textContent="Pronto: "+job.name+" (salvo em “Salvos”)";toast("Transcrito e salvo")}
+  else fstatus.textContent="Não encontrei fala nesse arquivo.";
+}
+
+async function guarded(name,fn){
+  if(busy)return;busy=true;fileBusy=true;keepAlive();prog.hidden=false;progbar.style.width="0%";
+  try{await fn()}
+  catch(err){
+    console.error(err);
+    if(isMem(err)){
+      await freeModel();
+      const l=lighter();
+      fstatus.textContent="O celular ficou sem memória."+(l?" Troquei para “"+l+"”. Escolha o arquivo de novo: ele continua de onde parou.":" Feche outros apps e tente de novo: ele continua de onde parou.");
+    }else if(window.claude&&window.claude.use){
+      fstatus.textContent="Aqui dentro do Claude o modelo de voz não pode ser baixado. Use o app Transcritor.";
+    }else fstatus.textContent=/decode|formato/i.test(String(err))?"Não consegui ler esse formato. Tente .mp3, .m4a ou .wav.":"Falhou: "+(err.message||err)+". Verifique a internet e tente de novo.";
+  }finally{busy=false;fileBusy=false;keepAlive();setTimeout(()=>{prog.hidden=true},800)}
+}
+
+// Caminho do app Android: o próprio Android lê o áudio e entrega aos pedaços
+const nativeFiles=!!(NA&&NA.pickAudio);
+if(nativeFiles){
+  document.querySelector('label[for="file"]').addEventListener("click",e=>{e.preventDefault();if(!busy)NA.pickAudio()});
+  window.__audio=(type,payload)=>{
+    if(type==="start"){busy=true;fileBusy=true;keepAlive();prog.hidden=false;progbar.style.width="0%";fstatus.textContent="Lendo o áudio…"}
+    else if(type==="progress"){progbar.style.width=payload+"%";fstatus.textContent="Lendo o áudio… "+payload+"%"}
+    else if(type==="error"){busy=false;fileBusy=false;keepAlive();prog.hidden=true;fstatus.textContent=payload||"Não consegui ler esse áudio."}
+    else if(type==="ready"){
+      const info=JSON.parse(payload);busy=false;
+      guarded(info.name,()=>runJob({name:info.name,key:info.name+"|"+info.size,
+        total:Math.max(1,Math.ceil(info.samples/CH)),
+        chunk:k=>{const b=atob(NA.chunk(k));const u=new Uint8Array(b.length);for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);
+          const i16=new Int16Array(u.buffer);const f=new Float32Array(i16.length);for(let i=0;i<i16.length;i++)f[i]=i16[i]/32768;return f}}));
+    }
+  };
+}
+
+// Caminho do navegador
 async function decodeTo16k(file){
   const buf=await file.arrayBuffer();
   const AC=window.AudioContext||window.webkitAudioContext;
   const ac=new AC();
   const audio=await new Promise((res,rej)=>{const p=ac.decodeAudioData(buf,res,rej);if(p&&p.catch)p.catch(rej)});
   ac.close&&ac.close();
-  const len=Math.ceil(audio.duration*16000);
-  const off=new OfflineAudioContext(1,len,16000);
+  const off=new OfflineAudioContext(1,Math.ceil(audio.duration*16000),16000);
   const src=off.createBufferSource();src.buffer=audio;src.connect(off.destination);src.start();
   const out=await off.startRendering();
-  return {data:out.getChannelData(0),dur:audio.duration};
+  return out.getChannelData(0);
 }
-$("file").addEventListener("change",async e=>{
-  const f=e.target.files[0];e.target.value="";if(!f||busy)return;
-  busy=true;fileBusy=true;keepAlive();prog.hidden=false;progbar.style.width="0%";
-  try{
+$("file").addEventListener("change",e=>{
+  const f=e.target.files[0];e.target.value="";if(!f)return;
+  guarded(f.name,async()=>{
     fstatus.textContent="Lendo o áudio…";
-    const {data,dur}=await decodeTo16k(f);
-    const model=$("model").value;
-    if(!asr||asrModel!==model){
-      fstatus.textContent="Baixando o modelo de voz (só na primeira vez)…";
-      const T=await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2");
-      const files={};
-      asr=await T.pipeline("automatic-speech-recognition",model,{dtype:"q8",
-        progress_callback:p=>{if(p.status==="progress"&&p.total){files[p.file]=[p.loaded,p.total];
-          let a=0,b=0;for(const k in files){a+=files[k][0];b+=files[k][1]}
-          progbar.style.width=Math.round(a/b*100)+"%";fstatus.textContent="Baixando o modelo… "+Math.round(a/b*100)+"%"}}});
-      asrModel=model;
-    }
-    // Transcreve em partes de 30 s e salva o texto depois de cada parte
-    const CH=30*16000, total=Math.max(1,Math.ceil(data.length/CH));
-    const jobKey=f.name+"|"+f.size;
-    const prev=store.get(KEY_JOB,null);
-    let start=0, ftext="";
-    if(prev&&prev.key===jobKey&&prev.done<total){start=prev.done;ftext=prev.text||"";toast("Continuando da parte "+(start+1))}
-    else if(text.value.trim()) append("\n\n");
-    let got=false;
-    for(let k=start;k<total;k++){
-      fstatus.textContent="Transcrevendo parte "+(k+1)+" de "+total+"…";
-      progbar.style.width=Math.round(k/total*100)+"%";
-      const seg=data.subarray(k*CH,Math.min((k+1)*CH,data.length));
-      const r=await asr(seg,{language:"portuguese",task:"transcribe"});
-      const t=(r.text||"").trim();
-      if(t){append(t+" ");ftext+=t+" ";got=true}
-      store.set(KEY_JOB,{key:jobKey,name:f.name,done:k+1,total,text:ftext});
-    }
-    progbar.style.width="100%";
-    store.set(KEY_JOB,null);
-    if(ftext.trim()) addHist(f.name,ftext);
-    if(ftext.trim()){fstatus.textContent="Pronto: "+f.name+" (salvo em “Salvos”)";toast("Transcrito e salvo")}
-    else fstatus.textContent="Não encontrei fala nesse arquivo.";
-  }catch(err){
-    console.error(err);
-    const inArt=!!(window.claude&&window.claude.use);
-    fstatus.textContent=inArt
-      ?"Aqui dentro do Claude o modelo de voz não pode ser baixado. Abra o arquivo transcritor.html no navegador do celular para transcrever arquivos."
-      :(/decode/i.test(String(err))?"Não consegui ler esse formato. Tente .mp3, .m4a ou .wav.":"Falhou: "+(err.message||err)+". Verifique a internet e tente de novo.");
-  }finally{busy=false;fileBusy=false;keepAlive();setTimeout(()=>{prog.hidden=true},800)}
+    const data=await decodeTo16k(f);
+    await runJob({name:f.name,key:f.name+"|"+f.size,total:Math.max(1,Math.ceil(data.length/CH)),
+      chunk:k=>data.subarray(k*CH,Math.min((k+1)*CH,data.length))});
+  });
 });
+
+// Se o app reiniciou por falta de memória, usa um modelo mais leve
+if(store.get("tv_crash",null)){store.set("tv_crash",null);
+  const l=lighter();
+  setTimeout(()=>{fstatus.textContent="O celular ficou sem memória e reiniciou o app."+(l?" Troquei para “"+l+"”.":"")+" O texto já transcrito está salvo. Escolha o mesmo arquivo para continuar de onde parou."},0)}
 
 text.value=store.get(KEY_DRAFT,"");updateCount();renderHist();
 if(NA&&NA.version){try{$("ver").textContent="Versão "+NA.version()}catch(_){}

@@ -219,7 +219,8 @@ jobs:
           import java.util.ArrayList;
 
           public class MainActivity extends Activity {
-            static final int REQ_FILE = 1, REQ_MIC = 2;
+            static final int REQ_FILE = 1, REQ_MIC = 2, REQ_AUDIO = 4;
+            File pcmFile; int pcmSamples = 0;
             WebView web;
             SpeechRecognizer sr;
             boolean listening = false;
@@ -243,6 +244,7 @@ jobs:
                 }
                 @Override public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail d) {
                   setKeepAlive(false, false);
+                  getSharedPreferences("dados", MODE_PRIVATE).edit().putString("tv_crash", "1").commit();
                   Toast.makeText(MainActivity.this, "O celular ficou sem memória e interrompeu a transcrição. Escolha o arquivo de novo para continuar de onde parou.", Toast.LENGTH_LONG).show();
                   recreate();
                   return true;
@@ -359,6 +361,12 @@ jobs:
 
             @Override protected void onActivityResult(int req, int res, Intent data) {
               super.onActivityResult(req, res, data);
+              if (req == REQ_AUDIO && res == RESULT_OK && data != null && data.getData() != null) {
+                final Uri u = data.getData();
+                audio("start", "");
+                new Thread(() -> decode(u)).start();
+                return;
+              }
               if (req == REQ_FILE && fileCb != null) {
                 fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data));
                 fileCb = null;
@@ -383,6 +391,22 @@ jobs:
               }
               @JavascriptInterface public void checkUpdates() { runOnUiThread(() -> checkUpdate(true)); }
               @JavascriptInterface public boolean saveTxt(String name, String content) { return saveToDownloads(name, content); }
+              @JavascriptInterface public void pickAudio() { runOnUiThread(() -> {
+                Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"audio/*", "video/*", "application/ogg"});
+                try { startActivityForResult(Intent.createChooser(i, "Escolha o áudio"), REQ_AUDIO); } catch (Exception e) {}
+              }); }
+              @JavascriptInterface public String chunk(int k) {
+                try (java.io.RandomAccessFile f = new java.io.RandomAccessFile(pcmFile, "r")) {
+                  long off = (long) k * 30 * 16000 * 2;
+                  int len = (int) Math.max(0, Math.min(30L * 16000 * 2, f.length() - off));
+                  byte[] b = new byte[len];
+                  f.seek(off); f.readFully(b);
+                  return android.util.Base64.encodeToString(b, android.util.Base64.NO_WRAP);
+                } catch (Exception e) { return ""; }
+              }
             }
 
             void askBattery() {
@@ -416,6 +440,104 @@ jobs:
                 }
                 return true;
               } catch (Exception e) { return false; }
+            }
+
+            void audio(String type, String payload) {
+              final String js = "window.__audio&&window.__audio(" + JSONObject.quote(type) + "," + JSONObject.quote(payload) + ")";
+              runOnUiThread(() -> web.evaluateJavascript(js, null));
+            }
+
+            void decode(Uri uri) {
+              String name = "audio"; long size = 0;
+              try (android.database.Cursor c = getContentResolver().query(uri, null, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                  int ni = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                  int si = c.getColumnIndex(android.provider.OpenableColumns.SIZE);
+                  if (ni >= 0) name = c.getString(ni);
+                  if (si >= 0) size = c.getLong(si);
+                }
+              } catch (Exception ignored) {}
+              android.media.MediaExtractor ex = new android.media.MediaExtractor();
+              android.media.MediaCodec codec = null;
+              File out = new File(getCacheDir(), "audio.pcm");
+              try (java.io.BufferedOutputStream os = new java.io.BufferedOutputStream(new FileOutputStream(out), 1 << 16)) {
+                ex.setDataSource(this, uri, null);
+                int track = -1; android.media.MediaFormat fmt = null;
+                for (int i = 0; i < ex.getTrackCount(); i++) {
+                  android.media.MediaFormat f = ex.getTrackFormat(i);
+                  String m = f.getString(android.media.MediaFormat.KEY_MIME);
+                  if (m != null && m.startsWith("audio/")) { track = i; fmt = f; break; }
+                }
+                if (track < 0) throw new Exception("sem áudio");
+                ex.selectTrack(track);
+                long durUs = fmt.containsKey(android.media.MediaFormat.KEY_DURATION) ? fmt.getLong(android.media.MediaFormat.KEY_DURATION) : 0;
+                codec = android.media.MediaCodec.createDecoderByType(fmt.getString(android.media.MediaFormat.KEY_MIME));
+                codec.configure(fmt, null, null, 0);
+                codec.start();
+                int rate = fmt.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE);
+                int ch = fmt.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT);
+                boolean isFloat = false;
+                double step = rate / 16000.0, t = 0; long n = -1; float prev = 0; int count = 0;
+                android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
+                boolean inDone = false, outDone = false; long lastUi = 0;
+                byte[] two = new byte[2];
+                while (!outDone) {
+                  if (!inDone) {
+                    int ii = codec.dequeueInputBuffer(10000);
+                    if (ii >= 0) {
+                      java.nio.ByteBuffer ib = codec.getInputBuffer(ii);
+                      int sz = ex.readSampleData(ib, 0);
+                      if (sz < 0) { codec.queueInputBuffer(ii, 0, 0, 0, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM); inDone = true; }
+                      else { codec.queueInputBuffer(ii, 0, sz, ex.getSampleTime(), 0); ex.advance(); }
+                    }
+                  }
+                  int oi = codec.dequeueOutputBuffer(info, 10000);
+                  if (oi == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    android.media.MediaFormat of = codec.getOutputFormat();
+                    rate = of.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE);
+                    ch = of.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT);
+                    isFloat = of.containsKey("pcm-encoding") && of.getInteger("pcm-encoding") == android.media.AudioFormat.ENCODING_PCM_FLOAT;
+                    step = rate / 16000.0;
+                  } else if (oi >= 0) {
+                    java.nio.ByteBuffer ob = codec.getOutputBuffer(oi);
+                    ob.position(info.offset); ob.limit(info.offset + info.size);
+                    ob.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                    int bps = isFloat ? 4 : 2;
+                    int frames = info.size / (bps * ch);
+                    for (int fI = 0; fI < frames; fI++) {
+                      float sum = 0;
+                      for (int c = 0; c < ch; c++) sum += isFloat ? ob.getFloat() : ob.getShort() / 32768f;
+                      float x = sum / ch;
+                      n++;
+                      while (t <= n) {
+                        float y = n == 0 ? x : prev + (float) (t - (n - 1)) * (x - prev);
+                        int v = Math.max(-32768, Math.min(32767, Math.round(y * 32767)));
+                        two[0] = (byte) v; two[1] = (byte) (v >> 8);
+                        os.write(two); count++;
+                        t += step;
+                      }
+                      prev = x;
+                    }
+                    codec.releaseOutputBuffer(oi, false);
+                    if ((info.flags & android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outDone = true;
+                    long now = System.currentTimeMillis();
+                    if (durUs > 0 && now - lastUi > 700) {
+                      lastUi = now;
+                      audio("progress", String.valueOf(Math.min(99, (int) (info.presentationTimeUs * 100 / durUs))));
+                    }
+                  }
+                }
+                os.flush();
+                pcmFile = out; pcmSamples = count;
+                JSONObject j = new JSONObject();
+                j.put("name", name); j.put("size", size); j.put("samples", count);
+                audio("ready", j.toString());
+              } catch (Exception e) {
+                audio("error", "Não consegui ler esse áudio. Tente outro formato (.mp3, .m4a, .wav).");
+              } finally {
+                try { if (codec != null) { codec.stop(); codec.release(); } } catch (Exception ignored) {}
+                ex.release();
+              }
             }
 
             void setKeepAlive(boolean on, boolean mic) {
