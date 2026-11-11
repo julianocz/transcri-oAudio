@@ -52,6 +52,8 @@ h2{font-family:var(--display);font-size:1rem;margin:0;letter-spacing:.02em}
 .hist li{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;gap:12px;align-items:flex-start}
 .hist .t{flex:1;min-width:0}
 .hist .d{font-family:var(--mono);font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.hist .n{margin:2px 0 0;font-weight:600;overflow-wrap:anywhere}
+.hist .acts{flex-wrap:wrap;margin-top:6px}
 .hist .p{margin:2px 0 0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:.95rem}
 .hist .acts{display:flex;gap:6px}
 .icon{border:none;background:none;color:var(--muted);cursor:pointer;font:inherit;font-size:.85rem;padding:6px 8px;border-radius:8px}
@@ -72,7 +74,7 @@ select.btn{font-weight:500;align-self:flex-start}
 <div class="wrap">
   <header>
     <h1>Transcritor de Voz</h1>
-    <span class="lang">pt-BR</span>
+    <span class="lang"><span id="ver">pt-BR</span> <button class="icon" id="upd" hidden>Procurar atualização</button></span>
   </header>
 
   <section class="stage">
@@ -112,7 +114,7 @@ select.btn{font-weight:500;align-self:flex-start}
     <div class="bar">
       <button class="btn primary" id="copy">Copiar</button>
       <button class="btn" id="save">Salvar</button>
-      <button class="btn" id="dl" hidden>Baixar .txt</button>
+      <button class="btn" id="dl" hidden>Salvar .txt no celular</button>
       <button class="btn" id="clear">Limpar</button>
       <span class="count" id="count">0 palavras</span>
     </div>
@@ -129,8 +131,19 @@ select.btn{font-weight:500;align-self:flex-start}
 const $ = id => document.getElementById(id);
 const mic=$("mic"), statusEl=$("status"), text=$("text"), partial=$("partial"), timerEl=$("timer"), note=$("note");
 const KEY_DRAFT="tv_draft", KEY_HIST="tv_hist", KEY_JOB="tv_job";
-const store={get(k,d){try{const v=localStorage.getItem(k);return v==null?d:JSON.parse(v)}catch(e){return d}},
-             set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+const NA=window.AndroidSpeech||null;
+const store={get(k,d){try{let v=null;
+    if(NA&&NA.load){v=NA.load(k);if(v===""||v==null){const ls=localStorage.getItem(k);if(ls!=null){v=ls;NA.save(k,ls)}}}
+    else v=localStorage.getItem(k);
+    return v==null||v===""?d:JSON.parse(v)}catch(e){return d}},
+  set(k,v){const j=JSON.stringify(v);try{if(NA&&NA.save)NA.save(k,j)}catch(e){}try{localStorage.setItem(k,j)}catch(e){}}};
+function addHist(title,txt){txt=(txt||"").trim();if(!txt)return;
+  const h=store.get(KEY_HIST,[]);h.unshift({id:Date.now(),at:new Date().toISOString(),title,text:txt});
+  store.set(KEY_HIST,h.slice(0,300));renderHist()}
+function fileName(title){return (title||"transcricao").replace(/\.[^.]+$/,"").replace(/[^\w\-]+/g,"_").slice(0,60)+"-"+new Date().toISOString().slice(0,16).replace(/[:T]/g,"-")+".txt"}
+async function saveTxt(title,txt){
+  if(NA&&NA.saveTxt){const n=fileName(title);toast(NA.saveTxt(n,txt)?"Salvo em Downloads/Transcritor":"Não consegui salvar o arquivo");return}
+  if(downloads){try{await downloads.save({filename:fileName(title),data:new Blob([txt],{type:"text/plain"})});toast("Arquivo salvo")}catch(e){toast("Download cancelado")}}}
 
 let engine=null;          // "dictation" | "webspeech" | null
 let dict=null, rec=null, listening=false, t0=0, tick=null, downloads=null;
@@ -139,7 +152,12 @@ function toast(msg){const t=$("toast");t.textContent=msg;t.classList.add("show")
 function updateCount(){const n=(text.value.trim().match(/\S+/g)||[]).length;$("count").textContent=n+(n===1?" palavra":" palavras");store.set(KEY_DRAFT,text.value)}
 function append(s){if(!s)return;if(!text.value.trim())s=s.replace(/^\s+/,"");else if(!/^\s/.test(s)&&!/\s$/.test(text.value))s=" "+s;
   text.value+=s;text.scrollTop=text.scrollHeight;updateCount()}
-function setUI(on,msg){listening=on;mic.classList.toggle("on",on);mic.setAttribute("aria-label",on?"Parar de gravar":"Começar a gravar");
+let micStart=-1;
+function setUI(on,msg){
+  if(on&&!listening) micStart=text.value.length;
+  if(!on&&listening&&micStart>=0){const seg=text.value.slice(micStart);micStart=-1;
+    if(seg.trim()){const d=new Date();addHist("Gravação "+d.toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit"})+" "+d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"}),seg);toast("Gravação salva")}}
+  listening=on;mic.classList.toggle("on",on);mic.setAttribute("aria-label",on?"Parar de gravar":"Começar a gravar");
   statusEl.textContent=msg||(on?"Ouvindo… toque de novo para parar.":"Toque no microfone e fale.");
   if(on){t0=Date.now();clearInterval(tick);tick=setInterval(()=>{const s=Math.floor((Date.now()-t0)/1000);timerEl.textContent=String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0")},500)}
   else{clearInterval(tick);partial.textContent=""}
@@ -222,22 +240,24 @@ $("copy").onclick=()=>{const v=text.value;if(!v.trim())return toast("Nada para c
   try{navigator.clipboard.writeText(v).then(()=>toast("Copiado"),fallback)}catch(e){fallback()}};
 $("clear").onclick=()=>{if(!text.value)return;if($("clear").dataset.arm){text.value="";updateCount();delete $("clear").dataset.arm;$("clear").textContent="Limpar";toast("Limpo")}
   else{$("clear").dataset.arm=1;$("clear").textContent="Confirmar?";setTimeout(()=>{delete $("clear").dataset.arm;$("clear").textContent="Limpar"},3000)}};
-$("save").onclick=()=>{const v=text.value.trim();if(!v)return toast("Nada para salvar");
-  const h=store.get(KEY_HIST,[]);h.unshift({id:Date.now(),at:new Date().toISOString(),text:v});store.set(KEY_HIST,h.slice(0,50));renderHist();toast("Salvo")};
-$("dl").onclick=async()=>{const v=text.value.trim();if(!v||!downloads)return;
-  const n="transcricao-"+new Date().toISOString().slice(0,16).replace(/[:T]/g,"-")+".txt";
-  try{await downloads.save({filename:n,data:new Blob([v],{type:"text/plain"})});toast("Arquivo salvo")}catch(e){toast("Download cancelado")}};
+$("save").onclick=()=>{const v=text.value.trim();if(!v)return toast("Nada para salvar");addHist("Texto salvo",v);toast("Salvo")};
+$("dl").onclick=()=>{const v=text.value.trim();if(!v)return toast("Nada para salvar");saveTxt("transcricao",v)};
 text.addEventListener("input",updateCount);
 
 function renderHist(){const h=store.get(KEY_HIST,[]),ul=$("hist");ul.innerHTML="";
-  if(!h.length){const li=document.createElement("p");li.className="empty";li.textContent="Nenhuma transcrição salva ainda. Use “Salvar” para guardar a atual.";ul.appendChild(li);return}
+  if(!h.length){const li=document.createElement("p");li.className="empty";li.textContent="Nenhuma transcrição salva ainda. Cada arquivo transcrito e cada gravação aparecem aqui sozinhos.";ul.appendChild(li);return}
   h.forEach(it=>{const li=document.createElement("li");
     const d=new Date(it.at);
-    li.innerHTML='<div class="t"><div class="d"></div><p class="p"></p></div><div class="acts"><button class="icon" data-a="open">Abrir</button><button class="icon" data-a="del">Excluir</button></div>';
+    li.innerHTML='<div class="t"><div class="d"></div><p class="n"></p><p class="p"></p><div class="acts"><button class="icon" data-a="open">Abrir</button><button class="icon" data-a="copy">Copiar</button><button class="icon" data-a="txt">Salvar .txt</button><button class="icon" data-a="del">Excluir</button></div></div>';
     li.querySelector(".d").textContent=d.toLocaleDateString("pt-BR",{day:"2-digit",month:"short"})+" · "+d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});
+    li.querySelector(".n").textContent=it.title||"Transcrição";
     li.querySelector(".p").textContent=it.text;
+    li.querySelector('[data-a="copy"]').onclick=()=>{try{navigator.clipboard.writeText(it.text).then(()=>toast("Copiado"),()=>toast("Não consegui copiar"))}catch(e){toast("Não consegui copiar")}};
+    const tb=li.querySelector('[data-a="txt"]');if(!(NA&&NA.saveTxt)&&!downloads)tb.hidden=true;tb.onclick=()=>saveTxt(it.title,it.text);
     li.querySelector('[data-a="open"]').onclick=()=>{text.value=it.text;updateCount();window.scrollTo({top:0,behavior:"smooth"});toast("Aberto para editar")};
-    li.querySelector('[data-a="del"]').onclick=()=>{store.set(KEY_HIST,store.get(KEY_HIST,[]).filter(x=>x.id!==it.id));renderHist()};
+    const del=li.querySelector('[data-a="del"]');
+    del.onclick=()=>{if(!del.dataset.arm){del.dataset.arm=1;del.textContent="Confirmar?";setTimeout(()=>{delete del.dataset.arm;del.textContent="Excluir"},3000);return}
+      store.set(KEY_HIST,store.get(KEY_HIST,[]).filter(x=>x.id!==it.id));renderHist();toast("Excluído")};
     ul.appendChild(li)})}
 
 // ---- Transcrição de arquivo (Whisper rodando no aparelho)
@@ -276,8 +296,8 @@ $("file").addEventListener("change",async e=>{
     const CH=30*16000, total=Math.max(1,Math.ceil(data.length/CH));
     const jobKey=f.name+"|"+f.size;
     const prev=store.get(KEY_JOB,null);
-    let start=0;
-    if(prev&&prev.key===jobKey&&prev.done<total){start=prev.done;toast("Continuando da parte "+(start+1))}
+    let start=0, ftext="";
+    if(prev&&prev.key===jobKey&&prev.done<total){start=prev.done;ftext=prev.text||"";toast("Continuando da parte "+(start+1))}
     else if(text.value.trim()) append("\n\n");
     let got=false;
     for(let k=start;k<total;k++){
@@ -286,12 +306,13 @@ $("file").addEventListener("change",async e=>{
       const seg=data.subarray(k*CH,Math.min((k+1)*CH,data.length));
       const r=await asr(seg,{language:"portuguese",task:"transcribe"});
       const t=(r.text||"").trim();
-      if(t){append(t+" ");got=true}
-      store.set(KEY_JOB,{key:jobKey,name:f.name,done:k+1,total});
+      if(t){append(t+" ");ftext+=t+" ";got=true}
+      store.set(KEY_JOB,{key:jobKey,name:f.name,done:k+1,total,text:ftext});
     }
     progbar.style.width="100%";
     store.set(KEY_JOB,null);
-    if(got||start>0){fstatus.textContent="Pronto: "+f.name;toast("Arquivo transcrito")}
+    if(ftext.trim()) addHist(f.name,ftext);
+    if(ftext.trim()){fstatus.textContent="Pronto: "+f.name+" (salvo em “Salvos”)";toast("Transcrito e salvo")}
     else fstatus.textContent="Não encontrei fala nesse arquivo.";
   }catch(err){
     console.error(err);
@@ -303,6 +324,9 @@ $("file").addEventListener("change",async e=>{
 });
 
 text.value=store.get(KEY_DRAFT,"");updateCount();renderHist();
+if(NA&&NA.version){try{$("ver").textContent="Versão "+NA.version()}catch(_){}
+  if(NA.checkUpdates){$("upd").hidden=false;$("upd").onclick=()=>{toast("Procurando atualização…");NA.checkUpdates()}}}
+if(NA&&NA.saveTxt) $("dl").hidden=false;
 (()=>{const j=store.get(KEY_JOB,null);
   if(j&&j.done<j.total){fstatus.textContent="A transcrição de “"+j.name+"” parou na parte "+j.done+" de "+j.total+". O texto até ali está salvo. Escolha o mesmo arquivo para continuar de onde parou."}})();
 

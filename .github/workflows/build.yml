@@ -87,6 +87,7 @@ jobs:
             <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
             <uses-permission android:name="android.permission.WAKE_LOCK"/>
             <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
             <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
             <queries>
               <intent><action android:name="android.speech.RecognitionService"/></intent>
@@ -269,7 +270,7 @@ jobs:
               }
               web.addJavascriptInterface(new Bridge(), "AndroidSpeech");
               web.loadUrl("https://appassets.androidplatform.net/assets/index.html");
-              checkUpdate();
+              checkUpdate(false);
             }
 
             @Override protected void onResume() {
@@ -287,17 +288,17 @@ jobs:
               return o.toString("UTF-8");
             }
 
-            void checkUpdate() {
+            void checkUpdate(final boolean manual) {
               new Thread(() -> {
                 try {
                   HttpURLConnection c = (HttpURLConnection) new URL(RELEASES).openConnection();
                   c.setRequestProperty("Accept", "application/vnd.github+json");
                   c.setConnectTimeout(10000); c.setReadTimeout(10000);
-                  if (c.getResponseCode() != 200) return;
+                  if (c.getResponseCode() != 200) { if (manual) say("Não consegui verificar agora. Tente de novo."); return; }
                   JSONObject j = new JSONObject(readAll(c.getInputStream()));
                   int latest = Integer.parseInt(j.getString("tag_name").replaceAll("[^0-9]", ""));
                   int mine = getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;
-                  if (latest <= mine) return;
+                  if (latest <= mine) { if (manual) say("Você já está na versão mais recente."); return; }
                   JSONArray a = j.getJSONArray("assets");
                   String url = null;
                   for (int i = 0; i < a.length(); i++) {
@@ -312,9 +313,11 @@ jobs:
                       .setPositiveButton("Atualizar", (d, w) -> download(u))
                       .setNegativeButton("Depois", null)
                       .show());
-                } catch (Exception ignored) {}
+                } catch (Exception e) { if (manual) say("Não consegui verificar agora. Tente de novo."); }
               }).start();
             }
+
+            void say(String m) { runOnUiThread(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show()); }
 
             void download(String u) {
               Toast.makeText(this, "Baixando atualização…", Toast.LENGTH_SHORT).show();
@@ -373,6 +376,13 @@ jobs:
               @JavascriptInterface public void start() { runOnUiThread(() -> startMic()); }
               @JavascriptInterface public void stop() { runOnUiThread(() -> stopMic()); }
               @JavascriptInterface public void keepAlive(boolean on, boolean mic) { runOnUiThread(() -> setKeepAlive(on, mic)); }
+              @JavascriptInterface public String load(String k) { return getSharedPreferences("dados", MODE_PRIVATE).getString(k, ""); }
+              @JavascriptInterface public void save(String k, String v) { getSharedPreferences("dados", MODE_PRIVATE).edit().putString(k, v).commit(); }
+              @JavascriptInterface public String version() {
+                try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return ""; }
+              }
+              @JavascriptInterface public void checkUpdates() { runOnUiThread(() -> checkUpdate(true)); }
+              @JavascriptInterface public boolean saveTxt(String name, String content) { return saveToDownloads(name, content); }
             }
 
             void askBattery() {
@@ -385,6 +395,27 @@ jobs:
                   startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName())));
                 }
               } catch (Exception ignored) {}
+            }
+
+            boolean saveToDownloads(String name, String content) {
+              try {
+                byte[] b = content.getBytes("UTF-8");
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                  android.content.ContentValues v = new android.content.ContentValues();
+                  v.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name);
+                  v.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+                  v.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Download/Transcritor");
+                  Uri u = getContentResolver().insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                  java.io.OutputStream o = getContentResolver().openOutputStream(u);
+                  o.write(b); o.close();
+                } else {
+                  File d = new File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "Transcritor");
+                  d.mkdirs();
+                  FileOutputStream o = new FileOutputStream(new File(d, name));
+                  o.write(b); o.close();
+                }
+                return true;
+              } catch (Exception e) { return false; }
             }
 
             void setKeepAlive(boolean on, boolean mic) {
