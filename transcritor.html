@@ -142,7 +142,11 @@ function append(s){if(!s)return;if(!text.value.trim())s=s.replace(/^\s+/,"");els
 function setUI(on,msg){listening=on;mic.classList.toggle("on",on);mic.setAttribute("aria-label",on?"Parar de gravar":"Começar a gravar");
   statusEl.textContent=msg||(on?"Ouvindo… toque de novo para parar.":"Toque no microfone e fale.");
   if(on){t0=Date.now();clearInterval(tick);tick=setInterval(()=>{const s=Math.floor((Date.now()-t0)/1000);timerEl.textContent=String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0")},500)}
-  else{clearInterval(tick);partial.textContent=""}}
+  else{clearInterval(tick);partial.textContent=""}
+  keepAlive()}
+let fileBusy=false;
+function keepAlive(){const A=window.AndroidSpeech;if(!A||!A.keepAlive)return;
+  try{if(listening)A.keepAlive(true,true);else if(fileBusy)A.keepAlive(true,false);else A.keepAlive(false,false)}catch(_){}}
 function noMic(msg){note.hidden=false;note.textContent=msg;mic.disabled=true;mic.style.opacity=.4;statusEl.textContent="Gravação indisponível aqui. Você ainda pode digitar."}
 
 // ---- Web Speech (quando o arquivo é aberto direto no navegador do celular)
@@ -253,7 +257,7 @@ async function decodeTo16k(file){
 }
 $("file").addEventListener("change",async e=>{
   const f=e.target.files[0];e.target.value="";if(!f||busy)return;
-  busy=true;prog.hidden=false;progbar.style.width="0%";
+  busy=true;fileBusy=true;keepAlive();prog.hidden=false;progbar.style.width="0%";
   try{
     fstatus.textContent="Lendo o áudio…";
     const {data,dur}=await decodeTo16k(f);
@@ -281,7 +285,7 @@ $("file").addEventListener("change",async e=>{
     fstatus.textContent=inArt
       ?"Aqui dentro do Claude o modelo de voz não pode ser baixado. Abra o arquivo transcritor.html no navegador do celular para transcrever arquivos."
       :(/decode/i.test(String(err))?"Não consegui ler esse formato. Tente .mp3, .m4a ou .wav.":"Falhou: "+(err.message||err)+". Verifique a internet e tente de novo.");
-  }finally{busy=false;setTimeout(()=>{prog.hidden=true},800)}
+  }finally{busy=false;fileBusy=false;keepAlive();setTimeout(()=>{prog.hidden=true},800)}
 });
 
 text.value=store.get(KEY_DRAFT,"");updateCount();renderHist();

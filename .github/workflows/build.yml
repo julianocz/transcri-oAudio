@@ -25,7 +25,7 @@ jobs:
       - name: Criar projeto Android
         run: |
           set -e
-          mkdir -p app/src/main/java/br/transcritor app/src/main/assets app/src/main/res/drawable
+          mkdir -p app/src/main/java/br/transcritor app/src/main/assets app/src/main/res/drawable app/src/main/res/xml
           cp transcritor.html app/src/main/assets/index.html
 
           cat > settings.gradle <<'EOF'
@@ -53,15 +53,27 @@ jobs:
               applicationId 'br.transcritor'
               minSdk 24
               targetSdk 34
-              versionCode 1
-              versionName '1.0'
+              versionCode Integer.parseInt(System.getenv('GITHUB_RUN_NUMBER') ?: '1')
+              versionName '1.' + (System.getenv('GITHUB_RUN_NUMBER') ?: '0')
             }
+            signingConfigs {
+              debug {
+                storeFile rootProject.file('debug.keystore')
+                storePassword 'android'
+                keyAlias 'androiddebugkey'
+                keyPassword 'android'
+              }
+            }
+            buildTypes { debug { signingConfig signingConfigs.debug } }
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
               targetCompatibility JavaVersion.VERSION_17
             }
           }
-          dependencies { implementation 'androidx.webkit:webkit:1.11.0' }
+          dependencies {
+            implementation 'androidx.webkit:webkit:1.11.0'
+            implementation 'androidx.core:core:1.13.1'
+          }
           EOF
 
           cat > app/src/main/AndroidManifest.xml <<'EOF'
@@ -69,6 +81,12 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
             <uses-permission android:name="android.permission.INTERNET"/>
             <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+            <uses-permission android:name="android.permission.WAKE_LOCK"/>
+            <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
             <queries>
               <intent><action android:name="android.speech.RecognitionService"/></intent>
             </queries>
@@ -82,8 +100,19 @@ jobs:
                   <category android:name="android.intent.category.LAUNCHER"/>
                 </intent-filter>
               </activity>
+              <service android:name=".KeepAliveService" android:exported="false"
+                  android:foregroundServiceType="microphone|dataSync"/>
+              <provider android:name="androidx.core.content.FileProvider"
+                  android:authorities="br.transcritor.files" android:exported="false"
+                  android:grantUriPermissions="true">
+                <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/paths"/>
+              </provider>
             </application>
           </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/paths.xml <<'EOF'
+          <paths><cache-path name="c" path="."/></paths>
           EOF
 
           cat > app/src/main/res/drawable/ic.xml <<'EOF'
@@ -95,12 +124,78 @@ jobs:
           </vector>
           EOF
 
+          cat > app/src/main/java/br/transcritor/KeepAliveService.java <<'EOF'
+          package br.transcritor;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.os.PowerManager;
+
+          public class KeepAliveService extends Service {
+            static final String CH = "transcricao";
+            PowerManager.WakeLock lock;
+
+            @Override public int onStartCommand(Intent intent, int flags, int startId) {
+              boolean mic = intent != null && intent.getBooleanExtra("mic", false);
+              NotificationManager nm = getSystemService(NotificationManager.class);
+              if (Build.VERSION.SDK_INT >= 26 && nm.getNotificationChannel(CH) == null) {
+                nm.createNotificationChannel(new NotificationChannel(CH, "Transcrição", NotificationManager.IMPORTANCE_LOW));
+              }
+              Intent open = new Intent(this, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+              PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE);
+              Notification.Builder nb = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CH) : new Notification.Builder(this);
+              Notification n = nb.setContentTitle("Transcritor")
+                  .setContentText(mic ? "Ouvindo e transcrevendo…" : "Transcrevendo o arquivo…")
+                  .setSmallIcon(R.drawable.ic).setContentIntent(pi).setOngoing(true).build();
+              try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                  startForeground(1, n, mic ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE : ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                } else {
+                  startForeground(1, n);
+                }
+              } catch (Exception e) {
+                try { startForeground(1, n); } catch (Exception ignored) {}
+              }
+              if (lock == null) {
+                lock = ((PowerManager) getSystemService(POWER_SERVICE)).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "transcritor:work");
+                lock.acquire(3 * 60 * 60 * 1000L);
+              }
+              return START_NOT_STICKY;
+            }
+
+            @Override public void onDestroy() {
+              if (lock != null && lock.isHeld()) lock.release();
+              super.onDestroy();
+            }
+
+            @Override public IBinder onBind(Intent i) { return null; }
+          }
+          EOF
+
           cat > app/src/main/java/br/transcritor/MainActivity.java <<'EOF'
           package br.transcritor;
 
           import android.Manifest;
           import android.app.Activity;
+          import android.app.AlertDialog;
           import android.content.Intent;
+          import android.provider.Settings;
+          import android.widget.Toast;
+          import androidx.core.content.FileProvider;
+          import org.json.JSONArray;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.ByteArrayOutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
           import android.content.pm.PackageManager;
           import android.net.Uri;
           import android.os.Bundle;
@@ -125,6 +220,8 @@ jobs:
             SpeechRecognizer sr;
             boolean listening = false;
             ValueCallback<Uri[]> fileCb;
+            File pendingApk;
+            static final String RELEASES = "https://api.github.com/repos/julianocz/transcri-oAudio/releases/latest";
 
             @Override protected void onCreate(Bundle b) {
               super.onCreate(b);
@@ -154,8 +251,98 @@ jobs:
                   return true;
                 }
               });
+              if (android.os.Build.VERSION.SDK_INT >= 26) {
+                web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+              }
+              if (android.os.Build.VERSION.SDK_INT >= 33
+                  && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 3);
+              }
               web.addJavascriptInterface(new Bridge(), "AndroidSpeech");
               web.loadUrl("https://appassets.androidplatform.net/assets/index.html");
+              checkUpdate();
+            }
+
+            @Override protected void onResume() {
+              super.onResume();
+              if (pendingApk != null && (android.os.Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls())) {
+                File f = pendingApk; pendingApk = null; install(f);
+              }
+            }
+
+            static String readAll(InputStream in) throws Exception {
+              ByteArrayOutputStream o = new ByteArrayOutputStream();
+              byte[] buf = new byte[8192]; int n;
+              while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+              in.close();
+              return o.toString("UTF-8");
+            }
+
+            void checkUpdate() {
+              new Thread(() -> {
+                try {
+                  HttpURLConnection c = (HttpURLConnection) new URL(RELEASES).openConnection();
+                  c.setRequestProperty("Accept", "application/vnd.github+json");
+                  c.setConnectTimeout(10000); c.setReadTimeout(10000);
+                  if (c.getResponseCode() != 200) return;
+                  JSONObject j = new JSONObject(readAll(c.getInputStream()));
+                  int latest = Integer.parseInt(j.getString("tag_name").replaceAll("[^0-9]", ""));
+                  int mine = getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;
+                  if (latest <= mine) return;
+                  JSONArray a = j.getJSONArray("assets");
+                  String url = null;
+                  for (int i = 0; i < a.length(); i++) {
+                    JSONObject x = a.getJSONObject(i);
+                    if (x.getString("name").endsWith(".apk")) url = x.getString("browser_download_url");
+                  }
+                  if (url == null) return;
+                  final String u = url;
+                  runOnUiThread(() -> new AlertDialog.Builder(this)
+                      .setTitle("Atualização disponível")
+                      .setMessage("Há uma versão nova do Transcritor. Baixar e instalar agora?")
+                      .setPositiveButton("Atualizar", (d, w) -> download(u))
+                      .setNegativeButton("Depois", null)
+                      .show());
+                } catch (Exception ignored) {}
+              }).start();
+            }
+
+            void download(String u) {
+              Toast.makeText(this, "Baixando atualização…", Toast.LENGTH_SHORT).show();
+              new Thread(() -> {
+                try {
+                  String next = u; HttpURLConnection c = null;
+                  for (int k = 0; k < 5; k++) {
+                    c = (HttpURLConnection) new URL(next).openConnection();
+                    c.setInstanceFollowRedirects(false);
+                    int code = c.getResponseCode();
+                    if (code >= 300 && code < 400) { next = c.getHeaderField("Location"); continue; }
+                    break;
+                  }
+                  File f = new File(getCacheDir(), "update.apk");
+                  InputStream in = c.getInputStream();
+                  FileOutputStream out = new FileOutputStream(f);
+                  byte[] buf = new byte[16384]; int n;
+                  while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                  out.close(); in.close();
+                  runOnUiThread(() -> install(f));
+                } catch (Exception e) {
+                  runOnUiThread(() -> Toast.makeText(this, "Não consegui baixar a atualização.", Toast.LENGTH_LONG).show());
+                }
+              }).start();
+            }
+
+            void install(File f) {
+              if (android.os.Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+                pendingApk = f;
+                Toast.makeText(this, "Permita instalar atualizações e volte ao app.", Toast.LENGTH_LONG).show();
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+                return;
+              }
+              Uri uri = FileProvider.getUriForFile(this, "br.transcritor.files", f);
+              Intent i = new Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+                  .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+              startActivity(i);
             }
 
             @Override protected void onActivityResult(int req, int res, Intent data) {
@@ -176,6 +363,18 @@ jobs:
               @JavascriptInterface public boolean available() { return SpeechRecognizer.isRecognitionAvailable(MainActivity.this); }
               @JavascriptInterface public void start() { runOnUiThread(() -> startMic()); }
               @JavascriptInterface public void stop() { runOnUiThread(() -> stopMic()); }
+              @JavascriptInterface public void keepAlive(boolean on, boolean mic) { runOnUiThread(() -> setKeepAlive(on, mic)); }
+            }
+
+            void setKeepAlive(boolean on, boolean mic) {
+              Intent i = new Intent(this, KeepAliveService.class).putExtra("mic", mic);
+              try {
+                if (on) {
+                  if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+                } else {
+                  stopService(i);
+                }
+              } catch (Exception ignored) {}
             }
 
             void startMic() {
@@ -239,12 +438,13 @@ jobs:
             }
 
             @Override protected void onDestroy() {
+              setKeepAlive(false, false);
               if (sr != null) sr.destroy();
               super.onDestroy();
             }
 
             @Override public void onBackPressed() {
-              if (web.canGoBack()) web.goBack(); else super.onBackPressed();
+              if (web.canGoBack()) web.goBack(); else moveTaskToBack(true);
             }
           }
           EOF
