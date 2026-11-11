@@ -1,0 +1,299 @@
+<title>Transcritor de Voz</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: coluna única de app — cabeçalho, botão de gravar central, folha de transcrição, histórico */
+:root{
+  --bg:#f3f5f4; --surface:#ffffff; --fg:#17201d; --muted:#5d6b66; --line:#d9e0dd;
+  --accent:#0f8a6c; --accent-ink:#ffffff; --rec:#d6383a; --soft:#e4efeb;
+  --display:"Sora",system-ui,sans-serif; --body:"Inter",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#101614; --surface:#18211e; --fg:#e7eeeb; --muted:#93a39d; --line:#2a3632;
+  --accent:#3cc59f; --accent-ink:#06231b; --rec:#ff6264; --soft:#1e2c28; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#101614; --surface:#18211e; --fg:#e7eeeb; --muted:#93a39d; --line:#2a3632;
+  --accent:#3cc59f; --accent-ink:#06231b; --rec:#ff6264; --soft:#1e2c28; color-scheme:dark}
+html,body{min-height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:16px;line-height:1.5;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:20px 40px}
+.wrap{max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+h1{font-family:var(--display);font-size:1.5rem;margin:0;letter-spacing:-.01em}
+.lang{font-family:var(--mono);font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.stage{display:flex;flex-direction:column;align-items:center;gap:12px;padding-block:8px}
+.mic{width:112px;height:112px;border-radius:50%;border:none;background:var(--accent);color:var(--accent-ink);
+  display:grid;place-items:center;cursor:pointer;position:relative;transition:transform .15s,background .2s}
+.mic:active{transform:scale(.96)}
+.mic:focus-visible{outline:3px solid var(--fg);outline-offset:4px}
+.mic svg{width:44px;height:44px}
+.mic.on{background:var(--rec)}
+.mic.on::after{content:"";position:absolute;inset:-10px;border-radius:50%;border:3px solid var(--rec);opacity:.5;animation:pulse 1.4s ease-out infinite}
+@keyframes pulse{from{transform:scale(.9);opacity:.6}to{transform:scale(1.25);opacity:0}}
+@media (prefers-reduced-motion:reduce){.mic.on::after{animation:none}}
+.status{font-size:.95rem;color:var(--muted);text-align:center;min-height:1.5em}
+.timer{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:1.1rem}
+.sheet{background:var(--surface);border:1px solid var(--line);border-radius:14px;display:flex;flex-direction:column;overflow:hidden}
+textarea{width:100%;min-height:220px;resize:vertical;border:none;background:transparent;color:var(--fg);
+  font:inherit;font-size:1.05rem;line-height:1.6;padding:16px;box-sizing:border-box}
+textarea:focus{outline:none}
+.partial{padding:0 16px 12px;color:var(--muted);font-style:italic;min-height:1.2em}
+.bar{display:flex;gap:8px;flex-wrap:wrap;padding:10px 12px;border-top:1px solid var(--line);align-items:center}
+.count{margin-left:auto;font-family:var(--mono);font-size:.78rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.btn{font:inherit;font-size:.9rem;font-weight:600;border:1px solid var(--line);background:var(--soft);color:var(--fg);
+  border-radius:10px;padding:8px 14px;cursor:pointer;min-height:40px}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn[disabled]{opacity:.5;cursor:default}
+.note{font-size:.85rem;color:var(--muted);background:var(--soft);border-radius:10px;padding:10px 12px}
+.note[hidden]{display:none}
+h2{font-family:var(--display);font-size:1rem;margin:0;letter-spacing:.02em}
+.hist{display:flex;flex-direction:column;gap:8px;list-style:none;margin:0;padding:0}
+.hist li{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;gap:12px;align-items:flex-start}
+.hist .t{flex:1;min-width:0}
+.hist .d{font-family:var(--mono);font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.hist .p{margin:2px 0 0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:.95rem}
+.hist .acts{display:flex;gap:6px}
+.icon{border:none;background:none;color:var(--muted);cursor:pointer;font:inherit;font-size:.85rem;padding:6px 8px;border-radius:8px}
+.icon:hover,.icon:focus-visible{background:var(--soft);color:var(--fg);outline:none}
+.empty{color:var(--muted);font-size:.9rem}
+.file{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.file-row{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.hint{margin:4px 0 0;font-size:.85rem;color:var(--muted)}
+label.btn{display:inline-flex;align-items:center}
+select.btn{font-weight:500;align-self:flex-start}
+.prog{height:6px;background:var(--soft);border-radius:999px;overflow:hidden}
+.prog>div{height:100%;width:0;background:var(--accent);transition:width .2s}
+.toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);
+  background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:999px;font-size:.9rem;font-weight:500;opacity:0;pointer-events:none;transition:opacity .2s}
+.toast.show{opacity:1}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Transcritor de Voz</h1>
+    <span class="lang">pt-BR</span>
+  </header>
+
+  <section class="stage">
+    <button class="mic" id="mic" aria-label="Começar a gravar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor"></rect>
+        <path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v4"></path>
+      </svg>
+    </button>
+    <div class="timer" id="timer">00:00</div>
+    <div class="status" id="status">Toque no microfone e fale.</div>
+  </section>
+
+  <p class="note" id="note" hidden></p>
+
+  <section class="file">
+    <div class="file-row">
+      <div style="min-width:0">
+        <h2>Transcrever um arquivo de áudio</h2>
+        <p class="hint">Áudio do WhatsApp, gravação ou vídeo (.ogg, .opus, .mp3, .m4a, .wav, .mp4). Roda no próprio aparelho.</p>
+      </div>
+      <label class="btn primary" for="file">Escolher arquivo</label>
+      <input type="file" id="file" accept="audio/*,video/*,.ogg,.opus,.m4a,.mp3,.wav,.webm" hidden>
+    </div>
+    <select id="model" class="btn" aria-label="Qualidade">
+      <option value="onnx-community/whisper-base">Rápido (~80 MB)</option>
+      <option value="onnx-community/whisper-small">Mais preciso (~250 MB)</option>
+    </select>
+    <div class="prog" id="prog" hidden><div id="progbar"></div></div>
+    <div class="status" id="fstatus" style="text-align:left"></div>
+  </section>
+
+  <section class="sheet">
+    <label for="text" class="sr" hidden>Transcrição</label>
+    <textarea id="text" placeholder="O texto falado aparece aqui. Você pode editar à vontade."></textarea>
+    <div class="partial" id="partial" aria-live="polite"></div>
+    <div class="bar">
+      <button class="btn primary" id="copy">Copiar</button>
+      <button class="btn" id="save">Salvar</button>
+      <button class="btn" id="dl" hidden>Baixar .txt</button>
+      <button class="btn" id="clear">Limpar</button>
+      <span class="count" id="count">0 palavras</span>
+    </div>
+  </section>
+
+  <section style="display:flex;flex-direction:column;gap:10px">
+    <h2>Salvos neste aparelho</h2>
+    <ul class="hist" id="hist"></ul>
+  </section>
+</div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const mic=$("mic"), statusEl=$("status"), text=$("text"), partial=$("partial"), timerEl=$("timer"), note=$("note");
+const KEY_DRAFT="tv_draft", KEY_HIST="tv_hist";
+const store={get(k,d){try{const v=localStorage.getItem(k);return v==null?d:JSON.parse(v)}catch(e){return d}},
+             set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+
+let engine=null;          // "dictation" | "webspeech" | null
+let dict=null, rec=null, listening=false, t0=0, tick=null, downloads=null;
+
+function toast(msg){const t=$("toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),1800)}
+function updateCount(){const n=(text.value.trim().match(/\S+/g)||[]).length;$("count").textContent=n+(n===1?" palavra":" palavras");store.set(KEY_DRAFT,text.value)}
+function append(s){if(!s)return;if(!text.value.trim())s=s.replace(/^\s+/,"");else if(!/^\s/.test(s)&&!/\s$/.test(text.value))s=" "+s;
+  text.value+=s;text.scrollTop=text.scrollHeight;updateCount()}
+function setUI(on,msg){listening=on;mic.classList.toggle("on",on);mic.setAttribute("aria-label",on?"Parar de gravar":"Começar a gravar");
+  statusEl.textContent=msg||(on?"Ouvindo… toque de novo para parar.":"Toque no microfone e fale.");
+  if(on){t0=Date.now();clearInterval(tick);tick=setInterval(()=>{const s=Math.floor((Date.now()-t0)/1000);timerEl.textContent=String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0")},500)}
+  else{clearInterval(tick);partial.textContent=""}}
+function noMic(msg){note.hidden=false;note.textContent=msg;mic.disabled=true;mic.style.opacity=.4;statusEl.textContent="Gravação indisponível aqui. Você ainda pode digitar."}
+
+// ---- Web Speech (quando o arquivo é aberto direto no navegador do celular)
+function setupWebSpeech(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR) return false;
+  rec=new SR();rec.lang="pt-BR";rec.continuous=true;rec.interimResults=true;
+  rec.onresult=e=>{let interim="";for(let i=e.resultIndex;i<e.results.length;i++){const r=e.results[i];
+    if(r.isFinal)append(r[0].transcript.trim()+" ");else interim+=r[0].transcript}partial.textContent=interim};
+  rec.onerror=e=>{if(e.error==="not-allowed"||e.error==="service-not-allowed"){setUI(false);noMic("O navegador bloqueou o microfone. Libere o acesso ao microfone nas configurações do site e recarregue.");}
+    else if(e.error!=="no-speech"&&e.error!=="aborted"){statusEl.textContent="Erro: "+e.error}};
+  rec.onend=()=>{if(listening){try{rec.start()}catch(_){setUI(false)}}}; // reinicia em pausas longas
+  engine="webspeech";return true;
+}
+
+// ---- Ditado do Claude (quando aberto como artifact)
+async function setupDictation(){
+  if(!window.claude||typeof window.claude.use!=="function") return false;
+  const d=await window.claude.use("dictation");
+  try{downloads=await window.claude.use("downloads");if(downloads)$("dl").hidden=false}catch(_){}
+  if(!d) return false;
+  dict=d;engine="dictation";
+  d.onPartial(({text:t})=>{partial.textContent=t});
+  d.onFinal(({text:t})=>append(t));
+  d.onState(({state,reason})=>{
+    if(state==="starting")setUI(false,"Abrindo o microfone…");
+    else if(state==="listening")setUI(true);
+    else if(state==="finishing")statusEl.textContent="Finalizando as últimas palavras…";
+    else{setUI(false);
+      const m={not_granted:"Microfone não autorizado. Você pode liberar no menu Permissões do artifact.",
+        unavailable:"Ditado não disponível nesta conta ou idioma.",rate_limited:"Muitas gravações ao mesmo tempo. Tente de novo em instantes.",
+        upstream_error:"O microfone ou o serviço falhou. Tente de novo.",time_limit:"Limite de 60 minutos atingido. Toque para continuar."};
+      if(reason&&m[reason])statusEl.textContent=m[reason];}
+  });
+  return true;
+}
+
+// ---- Reconhecimento nativo do Android (quando roda dentro do APK)
+function setupNative(){
+  const A=window.AndroidSpeech;
+  if(!A) return false;
+  try{ if(!A.available()) { noMic("Este Android não tem o serviço de reconhecimento de voz do Google. Instale ou atualize o app Google."); engine="none"; return true; } }catch(_){}
+  window.__speech=(type,t)=>{
+    if(type==="partial") partial.textContent=t;
+    else if(type==="final"){ partial.textContent=""; append(t+" "); }
+    else if(type==="state"){
+      if(t==="listening") setUI(true);
+      else if(t==="denied") setUI(false,"Permissão do microfone negada. Libere em Configurações > Apps > Transcritor.");
+      else setUI(false);
+    }
+  };
+  engine="native"; return true;
+}
+
+mic.addEventListener("click",()=>{
+  if(engine==="native"){
+    if(listening) window.AndroidSpeech.stop(); else window.AndroidSpeech.start();
+  }else if(engine==="dictation"){
+    if(dict.active()){dict.stop().catch(()=>{});return}
+    dict.start({language:"pt-BR"}).catch(err=>{
+      if(err&&err.code==="unavailable"){dict.start().catch(()=>{})}   // tenta no idioma do aparelho
+      else if(err&&err.code==="not_granted"){statusEl.textContent="Microfone não autorizado."}
+      else if(err&&err.code==="dismissed"){statusEl.textContent="Toque de novo para autorizar o microfone."}
+    });
+  }else if(engine==="webspeech"){
+    if(listening){listening=false;rec.stop();setUI(false);return}
+    try{rec.start();setUI(true)}catch(e){statusEl.textContent="Não foi possível iniciar. Tente de novo."}
+  }
+});
+
+$("copy").onclick=()=>{const v=text.value;if(!v.trim())return toast("Nada para copiar");
+  const fallback=()=>{text.focus();text.select();toast("Texto selecionado — copie pelo menu")};
+  try{navigator.clipboard.writeText(v).then(()=>toast("Copiado"),fallback)}catch(e){fallback()}};
+$("clear").onclick=()=>{if(!text.value)return;if($("clear").dataset.arm){text.value="";updateCount();delete $("clear").dataset.arm;$("clear").textContent="Limpar";toast("Limpo")}
+  else{$("clear").dataset.arm=1;$("clear").textContent="Confirmar?";setTimeout(()=>{delete $("clear").dataset.arm;$("clear").textContent="Limpar"},3000)}};
+$("save").onclick=()=>{const v=text.value.trim();if(!v)return toast("Nada para salvar");
+  const h=store.get(KEY_HIST,[]);h.unshift({id:Date.now(),at:new Date().toISOString(),text:v});store.set(KEY_HIST,h.slice(0,50));renderHist();toast("Salvo")};
+$("dl").onclick=async()=>{const v=text.value.trim();if(!v||!downloads)return;
+  const n="transcricao-"+new Date().toISOString().slice(0,16).replace(/[:T]/g,"-")+".txt";
+  try{await downloads.save({filename:n,data:new Blob([v],{type:"text/plain"})});toast("Arquivo salvo")}catch(e){toast("Download cancelado")}};
+text.addEventListener("input",updateCount);
+
+function renderHist(){const h=store.get(KEY_HIST,[]),ul=$("hist");ul.innerHTML="";
+  if(!h.length){const li=document.createElement("p");li.className="empty";li.textContent="Nenhuma transcrição salva ainda. Use “Salvar” para guardar a atual.";ul.appendChild(li);return}
+  h.forEach(it=>{const li=document.createElement("li");
+    const d=new Date(it.at);
+    li.innerHTML='<div class="t"><div class="d"></div><p class="p"></p></div><div class="acts"><button class="icon" data-a="open">Abrir</button><button class="icon" data-a="del">Excluir</button></div>';
+    li.querySelector(".d").textContent=d.toLocaleDateString("pt-BR",{day:"2-digit",month:"short"})+" · "+d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});
+    li.querySelector(".p").textContent=it.text;
+    li.querySelector('[data-a="open"]').onclick=()=>{text.value=it.text;updateCount();window.scrollTo({top:0,behavior:"smooth"});toast("Aberto para editar")};
+    li.querySelector('[data-a="del"]').onclick=()=>{store.set(KEY_HIST,store.get(KEY_HIST,[]).filter(x=>x.id!==it.id));renderHist()};
+    ul.appendChild(li)})}
+
+// ---- Transcrição de arquivo (Whisper rodando no aparelho)
+const fstatus=$("fstatus"), prog=$("prog"), progbar=$("progbar");
+let asr=null, asrModel=null, busy=false;
+async function decodeTo16k(file){
+  const buf=await file.arrayBuffer();
+  const AC=window.AudioContext||window.webkitAudioContext;
+  const ac=new AC();
+  const audio=await new Promise((res,rej)=>{const p=ac.decodeAudioData(buf,res,rej);if(p&&p.catch)p.catch(rej)});
+  ac.close&&ac.close();
+  const len=Math.ceil(audio.duration*16000);
+  const off=new OfflineAudioContext(1,len,16000);
+  const src=off.createBufferSource();src.buffer=audio;src.connect(off.destination);src.start();
+  const out=await off.startRendering();
+  return {data:out.getChannelData(0),dur:audio.duration};
+}
+$("file").addEventListener("change",async e=>{
+  const f=e.target.files[0];e.target.value="";if(!f||busy)return;
+  busy=true;prog.hidden=false;progbar.style.width="0%";
+  try{
+    fstatus.textContent="Lendo o áudio…";
+    const {data,dur}=await decodeTo16k(f);
+    const model=$("model").value;
+    if(!asr||asrModel!==model){
+      fstatus.textContent="Baixando o modelo de voz (só na primeira vez)…";
+      const T=await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2");
+      const files={};
+      asr=await T.pipeline("automatic-speech-recognition",model,{dtype:"q8",
+        progress_callback:p=>{if(p.status==="progress"&&p.total){files[p.file]=[p.loaded,p.total];
+          let a=0,b=0;for(const k in files){a+=files[k][0];b+=files[k][1]}
+          progbar.style.width=Math.round(a/b*100)+"%";fstatus.textContent="Baixando o modelo… "+Math.round(a/b*100)+"%"}}});
+      asrModel=model;
+    }
+    const mins=Math.max(1,Math.round(dur/60));
+    fstatus.textContent="Transcrevendo "+mins+" min de áudio… isso pode levar alguns minutos.";
+    progbar.style.width="100%";
+    const r=await asr(data,{language:"portuguese",task:"transcribe",chunk_length_s:30,stride_length_s:5});
+    const out=(r.text||"").trim();
+    if(out){append((text.value.trim()?"\n\n":"")+out);fstatus.textContent="Pronto: "+f.name;toast("Arquivo transcrito")}
+    else fstatus.textContent="Não encontrei fala nesse arquivo.";
+  }catch(err){
+    console.error(err);
+    const inArt=!!(window.claude&&window.claude.use);
+    fstatus.textContent=inArt
+      ?"Aqui dentro do Claude o modelo de voz não pode ser baixado. Abra o arquivo transcritor.html no navegador do celular para transcrever arquivos."
+      :(/decode/i.test(String(err))?"Não consegui ler esse formato. Tente .mp3, .m4a ou .wav.":"Falhou: "+(err.message||err)+". Verifique a internet e tente de novo.");
+  }finally{busy=false;setTimeout(()=>{prog.hidden=true},800)}
+});
+
+text.value=store.get(KEY_DRAFT,"");updateCount();renderHist();
+
+(async()=>{
+  const inArtifact=!!(window.claude&&window.claude.use);
+  if(setupNative()) return;
+  if(inArtifact){
+    if(await setupDictation())return;
+    noMic("No app do Claude para celular o microfone não fica disponível aqui. Abra este link no Chrome (Android ou computador) para gravar.");
+  }else if(!setupWebSpeech()){
+    noMic("Este navegador não tem reconhecimento de voz. Use o Chrome no Android ou o Safari no iPhone.");
+  }
+})();
+</script>
