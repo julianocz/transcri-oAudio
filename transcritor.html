@@ -128,7 +128,7 @@ select.btn{font-weight:500;align-self:flex-start}
 <script>
 const $ = id => document.getElementById(id);
 const mic=$("mic"), statusEl=$("status"), text=$("text"), partial=$("partial"), timerEl=$("timer"), note=$("note");
-const KEY_DRAFT="tv_draft", KEY_HIST="tv_hist";
+const KEY_DRAFT="tv_draft", KEY_HIST="tv_hist", KEY_JOB="tv_job";
 const store={get(k,d){try{const v=localStorage.getItem(k);return v==null?d:JSON.parse(v)}catch(e){return d}},
              set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 
@@ -272,12 +272,26 @@ $("file").addEventListener("change",async e=>{
           progbar.style.width=Math.round(a/b*100)+"%";fstatus.textContent="Baixando o modelo… "+Math.round(a/b*100)+"%"}}});
       asrModel=model;
     }
-    const mins=Math.max(1,Math.round(dur/60));
-    fstatus.textContent="Transcrevendo "+mins+" min de áudio… isso pode levar alguns minutos.";
+    // Transcreve em partes de 30 s e salva o texto depois de cada parte
+    const CH=30*16000, total=Math.max(1,Math.ceil(data.length/CH));
+    const jobKey=f.name+"|"+f.size;
+    const prev=store.get(KEY_JOB,null);
+    let start=0;
+    if(prev&&prev.key===jobKey&&prev.done<total){start=prev.done;toast("Continuando da parte "+(start+1))}
+    else if(text.value.trim()) append("\n\n");
+    let got=false;
+    for(let k=start;k<total;k++){
+      fstatus.textContent="Transcrevendo parte "+(k+1)+" de "+total+"…";
+      progbar.style.width=Math.round(k/total*100)+"%";
+      const seg=data.subarray(k*CH,Math.min((k+1)*CH,data.length));
+      const r=await asr(seg,{language:"portuguese",task:"transcribe"});
+      const t=(r.text||"").trim();
+      if(t){append(t+" ");got=true}
+      store.set(KEY_JOB,{key:jobKey,name:f.name,done:k+1,total});
+    }
     progbar.style.width="100%";
-    const r=await asr(data,{language:"portuguese",task:"transcribe",chunk_length_s:30,stride_length_s:5});
-    const out=(r.text||"").trim();
-    if(out){append((text.value.trim()?"\n\n":"")+out);fstatus.textContent="Pronto: "+f.name;toast("Arquivo transcrito")}
+    store.set(KEY_JOB,null);
+    if(got||start>0){fstatus.textContent="Pronto: "+f.name;toast("Arquivo transcrito")}
     else fstatus.textContent="Não encontrei fala nesse arquivo.";
   }catch(err){
     console.error(err);
@@ -289,6 +303,8 @@ $("file").addEventListener("change",async e=>{
 });
 
 text.value=store.get(KEY_DRAFT,"");updateCount();renderHist();
+(()=>{const j=store.get(KEY_JOB,null);
+  if(j&&j.done<j.total){fstatus.textContent="A transcrição de “"+j.name+"” parou na parte "+j.done+" de "+j.total+". O texto até ali está salvo. Escolha o mesmo arquivo para continuar de onde parou."}})();
 
 (async()=>{
   const inArtifact=!!(window.claude&&window.claude.use);

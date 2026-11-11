@@ -87,6 +87,7 @@ jobs:
             <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
             <uses-permission android:name="android.permission.WAKE_LOCK"/>
             <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+            <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
             <queries>
               <intent><action android:name="android.speech.RecognitionService"/></intent>
             </queries>
@@ -94,7 +95,8 @@ jobs:
                 android:theme="@android:style/Theme.Material.Light.NoActionBar"
                 android:largeHeap="true">
               <activity android:name=".MainActivity" android:exported="true"
-                  android:configChanges="orientation|screenSize|keyboardHidden">
+                  android:launchMode="singleTask"
+                  android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
                 <intent-filter>
                   <action android:name="android.intent.action.MAIN"/>
                   <category android:name="android.intent.category.LAUNCHER"/>
@@ -148,7 +150,8 @@ jobs:
               if (Build.VERSION.SDK_INT >= 26 && nm.getNotificationChannel(CH) == null) {
                 nm.createNotificationChannel(new NotificationChannel(CH, "Transcrição", NotificationManager.IMPORTANCE_LOW));
               }
-              Intent open = new Intent(this, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+              Intent open = new Intent(this, MainActivity.class).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
               PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE);
               Notification.Builder nb = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CH) : new Notification.Builder(this);
               Notification n = nb.setContentTitle("Transcritor")
@@ -236,6 +239,12 @@ jobs:
               web.setWebViewClient(new WebViewClient() {
                 @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
                   return loader.shouldInterceptRequest(r.getUrl());
+                }
+                @Override public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail d) {
+                  setKeepAlive(false, false);
+                  Toast.makeText(MainActivity.this, "O celular ficou sem memória e interrompeu a transcrição. Escolha o arquivo de novo para continuar de onde parou.", Toast.LENGTH_LONG).show();
+                  recreate();
+                  return true;
                 }
               });
               web.setWebChromeClient(new WebChromeClient() {
@@ -366,9 +375,22 @@ jobs:
               @JavascriptInterface public void keepAlive(boolean on, boolean mic) { runOnUiThread(() -> setKeepAlive(on, mic)); }
             }
 
+            void askBattery() {
+              try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+                android.content.SharedPreferences sp = getSharedPreferences("app", MODE_PRIVATE);
+                if (android.os.Build.VERSION.SDK_INT >= 23 && !pm.isIgnoringBatteryOptimizations(getPackageName())
+                    && !sp.getBoolean("askedBattery", false)) {
+                  sp.edit().putBoolean("askedBattery", true).apply();
+                  startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName())));
+                }
+              } catch (Exception ignored) {}
+            }
+
             void setKeepAlive(boolean on, boolean mic) {
               Intent i = new Intent(this, KeepAliveService.class).putExtra("mic", mic);
               try {
+                if (on) askBattery();
                 if (on) {
                   if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
                 } else {
